@@ -9,6 +9,7 @@ import qualified Data.Map as M
 import qualified Control.Concurrent as CC
 import qualified Data.Text as T
 import qualified Control.Concurrent.MVar as MV
+import qualified Control.Exception as E
 import qualified Data.IORef as Ref
 
 {--------------------------------------------------------------------
@@ -93,6 +94,11 @@ connectedHandler instances = do
 
 ok = toJSON $ dm ["ok" .- True]
 
+err :: Show e => e -> IO H.Resp
+err e =
+    let body = toJSON $ dm ["error" .- show e]
+    in return $ H.setBody body H.resp
+
 {--------------------------------------------------------------------
   Connect handler.  
 --------------------------------------------------------------------}
@@ -131,4 +137,7 @@ main = do
             ["connect"]     -> connectHandler (H.params req) instances
             ["ping"]        -> pingHandler
             otherwise       -> unrecHandler
-    H.startServer 8081 handler
+        exHandler :: E.SomeException -> IO H.Resp
+        exHandler e = err e
+        handlerEx = \req -> E.catch (handler req) exHandler
+    H.startServer 8081 handlerEx
