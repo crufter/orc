@@ -10,7 +10,6 @@ import qualified Control.Concurrent as CC
 import qualified Data.Text as T
 import qualified Control.Concurrent.MVar as MV
 import qualified Data.IORef as Ref
-import Debug
 
 {--------------------------------------------------------------------
   Types and helpers.  
@@ -105,15 +104,19 @@ ok = toJSON $ dm ["ok" .- True]
 
 connectHandler :: Document -> Ref.IORef Instances -> IO H.Resp
 connectHandler dat instances = do
-    _ <- Ref.atomicModifyIORef' instances upd
+    Ref.atomicModifyIORef' instances upd
     return $ H.setBody ok H.resp
     where
         inst :: Instance
         inst = fromDocVal . d . set "connectTime" 1 $ dat
         upd :: Instances -> (Instances, ())
         upd i =
-            let servName = serviceName (trace (show inst) inst)
-            in (Is (M.adjust (\xs -> inst:xs) servName $ nameToNodes i), ())
+            let servName = serviceName inst
+                mapp = nameToNodes i
+                exists = M.member servName mapp
+            in if exists
+                then (Is (M.adjust (\xs -> inst:xs) servName mapp), ())
+                else (Is (M.insert servName [inst] mapp ), ())
 
 {--------------------------------------------------------------------
   Main loop.  
