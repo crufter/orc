@@ -10,7 +10,7 @@ import qualified Control.Concurrent as CC
 import qualified Data.Text as T
 import qualified Control.Concurrent.MVar as MV
 import qualified Control.Exception as E
-import qualified Data.IORef as Ref
+import qualified Data.IORef as Ref 
 
 {--------------------------------------------------------------------
   Types and helpers.  
@@ -59,20 +59,41 @@ instance DocValLike Instance where
                 (toString   $ get "instanceName" doc)
                 (M.fromList . map (\(k, v) -> (k, (fromDocVal v)::Endpoint)) . M.toList . toMap $ get "endpoints" doc)
 
-serviceNames :: Instances -> [T.Text]
-serviceNames ins =
-    let nameList = map fst . M.toList $ nameToNodes ins
-        unique = M.fromList $ map (\x -> (x, ())) nameList 
-    in map fst $ M.toList unique
-
 -- Maps serviceNames to instances
 data Instances = Is {
-    nameToNodes :: M.Map T.Text [Instance]
+    byServiceName   :: M.Map T.Text [T.Text],
+    services        :: M.Map T.Text Instance
 } deriving (Eq, Show)
+
+insert :: Instance -> Instances -> Instances
+insert i is =
+    if M.member iName $ (services is)
+        then is
+        else if M.member sName $ byServiceName is
+            then Is     (M.adjust (\xs -> iName:xs) sName $ byServiceName is)
+                        updated
+            else Is     (M.insert sName [iName] $ byServiceName is)
+                        updated
+    where
+        sName = serviceName i
+        iName = instanceName i
+        updated = M.insert iName i (services is)
+
+-- So inefficient, temporal
+remove :: T.Text -> Instances -> Instances
+remove iName is =
+    Is  (M.adjust (\xs -> filter (\x -> x /= iName) xs) iName $ byServiceName is)
+        (M.delete iName $ services is)
+
+--update :: T.Text -> (Instance -> Instance) -> Instances -> Instances
+--update instanceName updFunc ins = 
+
+serviceNames :: Instances -> [T.Text]
+serviceNames ins = map fst . M.toList $ byServiceName ins
 
 instance DocValLike Instances where
     toDocVal i = d [
-            "nameToNodes" .- (dm . map (\(k,v) -> (k, d $ map d v)) . M.toList $ nameToNodes i)
+            "byServiceName" .- (dm . map (\(k,v) -> (k, d $ map d v)) . M.toList $ byServiceName i)
         ]
 
 {--------------------------------------------------------------------
@@ -90,7 +111,8 @@ unrecHandler = return $ H.setBody unrecognizedPath H.resp
 connectedHandler :: Ref.IORef Instances -> IO H.Resp
 connectedHandler instances = do
     inst <- Ref.readIORef instances
-    return $ H.setBody (toJSON . toMap $ toDocVal inst) H.resp
+    --return $ H.setBody (toJSON . toMap $ toDocVal inst) H.resp
+    return $ H.setBody (show $ M.size $ services inst) H.resp
 
 ok = toJSON $ dm ["ok" .- True]
 
@@ -108,6 +130,9 @@ err e =
 --        "instanceName"  .- True
 --    ]
 
+modif :: (a -> b) -> (a -> (b, ()))
+modif f = (\a -> (f a, ()))
+
 connectHandler :: Document -> Ref.IORef Instances -> IO H.Resp
 connectHandler dat instances = do
     Ref.atomicModifyIORef' instances upd
@@ -116,13 +141,7 @@ connectHandler dat instances = do
         inst :: Instance
         inst = fromDocVal . d . set "connectTime" 1 $ dat
         upd :: Instances -> (Instances, ())
-        upd i =
-            let servName = serviceName inst
-                mapp = nameToNodes i
-                exists = M.member servName mapp
-            in if exists
-                then (Is (M.adjust (\xs -> inst:xs) servName mapp), ())
-                else (Is (M.insert servName [inst] mapp ), ())
+        upd = modif $ insert inst
 
 {--------------------------------------------------------------------
   Main loop.  
@@ -130,7 +149,7 @@ connectHandler dat instances = do
 
 main = do
     putStrLn "Starting ORC"
-    instances <- Ref.newIORef . Is $ M.fromList []
+    instances <- Ref.newIORef $ Is (M.fromList []) (M.fromList [])
     let handler req = case H.path req of
             -- ["disconnect"] -> disconnectHandler instances
             ["connected"]   -> connectedHandler instances
