@@ -1,6 +1,5 @@
 {-# LANGUAGE OverloadedStrings      #-}
 {-# LANGUAGE ExtendedDefaultRules   #-}
-{-# LANGUAGE BangPatterns           #-}
 
 import Hakit
 import qualified Hakit.Http as H
@@ -120,7 +119,43 @@ ok = toJSON $ dm ["ok" .- True]
 err :: Show e => e -> IO H.Resp
 err e =
     let body = toJSON $ dm ["error" .- show e]
-    in return $ H.setBody body H.resp
+    in return . H.setStatus 500 $ H.setBody body H.resp
+
+eize :: Show e => e -> T.Text
+eize e = toJSON $ dm ["error" .- show e]
+
+disconnectHandler :: Document -> TV.TVar Instances -> IO H.Resp
+disconnectHandler doc instances = do
+    STM.atomically $ TV.modifyTVar' instances del
+    return $ H.setBody ok H.resp
+    where
+        iName = getString "istanceName" doc
+        del = remove iName
+
+routeHandler :: Document -> TV.TVar Instances -> T.Text -> T.Text -> IO H.Resp
+routeHandler doc instances sName endpoint = do
+    inst <- TV.readTVarIO instances
+    case M.lookup sName $ byServiceName inst of
+        Nothing     -> return serviceNotFound
+        Just names  -> case M.lookup (head names) $ services inst of
+            Nothing -> error . T.unpack $ T.concat ["inconsistent state for ", head names]
+            Just i  -> case M.lookup endpoint $ endpoints i of
+                Nothing -> return endpointNotFound
+                Just e  -> call i e
+    where
+        call :: Instance -> Endpoint -> IO H.Resp
+        call i e = do
+            let p = filter (\x -> T.length x > 0) . T.splitOn "/" $ path e
+                r = H.setMethod (method e) . H.setPath p $ H.setDomain (address i) H.req
+            resp <- H.request r
+            return resp
+        -- 400ish errors
+        serviceNotFound =
+            let msg = eize $ T.concat["service ", sName, " not found"]
+            in H.setStatus 400 $ H.setBody msg H.resp
+        endpointNotFound =
+            let msg = eize $ T.concat ["endpoint ", endpoint, " for service ", sName, " not found"]
+            in H.setStatus 400 $ H.setBody msg H.resp
 
 {--------------------------------------------------------------------
   Connect handler.  
@@ -151,10 +186,11 @@ main = do
     putStrLn "Starting ORC"
     instances <- TV.newTVarIO $ Is (M.fromList []) (M.fromList [])
     let handler req = case H.path req of
-            -- ["disconnect"] -> disconnectHandler instances
+            ["disconnect"]  -> disconnectHandler (H.params req) instances
             ["connected"]   -> connectedHandler instances
             ["connect"]     -> connectHandler (H.params req) instances
             ["ping"]        -> pingHandler
+            [a, b]          -> routeHandler (H.params req) instances a b
             otherwise       -> unrecHandler
         exHandler :: E.SomeException -> IO H.Resp
         exHandler e = err e
