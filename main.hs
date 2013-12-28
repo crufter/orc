@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings      #-}
 {-# LANGUAGE ExtendedDefaultRules   #-}
+{-# LANGUAGE BangPatterns           #-}
 
 import Hakit
 import qualified Hakit.Http as H
@@ -10,7 +11,8 @@ import qualified Control.Concurrent as CC
 import qualified Data.Text as T
 import qualified Control.Concurrent.MVar as MV
 import qualified Control.Exception as E
-import qualified Data.IORef as Ref 
+import qualified Control.Concurrent.STM as STM
+import qualified Control.Concurrent.STM.TVar as TV
 
 {--------------------------------------------------------------------
   Types and helpers.  
@@ -108,11 +110,10 @@ unrecHandler = return $ H.setBody unrecognizedPath H.resp
     where
         unrecognizedPath = toJSON $ dm ["error" .- "Unrecognized path"]
 
-connectedHandler :: Ref.IORef Instances -> IO H.Resp
+connectedHandler :: TV.TVar Instances -> IO H.Resp
 connectedHandler instances = do
-    inst <- Ref.readIORef instances
-    --return $ H.setBody (toJSON . toMap $ toDocVal inst) H.resp
-    return $ H.setBody (show $ M.size $ services inst) H.resp
+    inst <- TV.readTVarIO instances
+    return $ H.setBody (toJSON . toMap $ toDocVal inst) H.resp
 
 ok = toJSON $ dm ["ok" .- True]
 
@@ -130,18 +131,17 @@ err e =
 --        "instanceName"  .- True
 --    ]
 
-modif :: (a -> b) -> (a -> (b, ()))
-modif f = (\a -> (f a, ()))
-
-connectHandler :: Document -> Ref.IORef Instances -> IO H.Resp
+connectHandler :: Document -> TV.TVar Instances -> IO H.Resp
 connectHandler dat instances = do
-    Ref.atomicModifyIORef' instances upd
+    -- Strangely the nonstrict version gives the same
+    -- effect as when an IORef stores the error?!
+    STM.atomically $ TV.modifyTVar' instances upd
     return $ H.setBody ok H.resp
     where
         inst :: Instance
         inst = fromDocVal . d . set "connectTime" 1 $ dat
-        upd :: Instances -> (Instances, ())
-        upd = modif $ insert inst
+        upd :: Instances -> Instances
+        upd = insert inst
 
 {--------------------------------------------------------------------
   Main loop.  
@@ -149,7 +149,7 @@ connectHandler dat instances = do
 
 main = do
     putStrLn "Starting ORC"
-    instances <- Ref.newIORef $ Is (M.fromList []) (M.fromList [])
+    instances <- TV.newTVarIO $ Is (M.fromList []) (M.fromList [])
     let handler req = case H.path req of
             -- ["disconnect"] -> disconnectHandler instances
             ["connected"]   -> connectedHandler instances
