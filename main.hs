@@ -50,7 +50,7 @@ instance DocValLike Instance where
             "address"       .- address i,
             "serviceName"   .- serviceName i,
             "instanceName"  .- instanceName i,
-            "endpoints"     .- (d . map (\(k, v) -> (k, d v)) . M.toList $ endpoints i)
+            "endpoints"     .- endpoints i
         ]
     fromDocVal d =
         let doc = toMap d
@@ -58,7 +58,7 @@ instance DocValLike Instance where
                 (toString   $ get "address" doc)
                 (toString   $ get "serviceName" doc)
                 (toString   $ get "instanceName" doc)
-                (M.fromList . map (\(k, v) -> (k, (fromDocVal v)::Endpoint)) . M.toList . toMap $ get "endpoints" doc)
+                (fromDocVal $ get "endpoints" doc)
 
 -- Maps serviceNames to instances
 data Instances = Is {
@@ -94,7 +94,8 @@ serviceNames ins = map fst . M.toList $ byServiceName ins
 
 instance DocValLike Instances where
     toDocVal i = d [
-            "byServiceName" .- (dm . map (\(k,v) -> (k, d $ map d v)) . M.toList $ byServiceName i)
+            "byServiceName" .- byServiceName i,
+            "services"      .- services i
         ]
 
 {--------------------------------------------------------------------
