@@ -185,13 +185,15 @@ connectHandler dat instances = do
 main = do
     putStrLn "Starting ORC"
     instances <- TV.newTVarIO $ Is (M.fromList []) (M.fromList [])
-    let handler req = case H.path req of
-            ["disconnect"]  -> disconnectHandler (H.params req) instances
-            ["connected"]   -> connectedHandler instances
-            ["connect"]     -> connectHandler (H.params req) instances
-            ["ping"]        -> pingHandler
-            [a, b]          -> routeHandler (H.params req) instances a b
-            otherwise       -> unrecHandler
+    let handler req =
+            let postJSON = fromJSON $ H.body req
+            in case H.path req of
+                ["disconnect"]  -> disconnectHandler postJSON instances
+                ["connected"]   -> connectedHandler instances
+                ["connect"]     -> connectHandler postJSON instances
+                ["ping"]        -> pingHandler
+                [a, b]          -> routeHandler postJSON instances a b
+                otherwise       -> unrecHandler
         exHandler :: E.SomeException -> IO H.Resp
         exHandler e = err e
         handlerEx = \req -> E.catch (handler req) exHandler
