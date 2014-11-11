@@ -1,9 +1,11 @@
 {-# LANGUAGE OverloadedStrings      #-}
 {-# LANGUAGE ExtendedDefaultRules   #-}
+{-# LANGUAGE DeriveGeneric          #-}
 
-import Hakit
-import qualified Hakit.Http as H
--- import qualified System.Environment as SE  
+import Data.Aeson
+import GHC.Generics
+import qualified Data.ByteString as B
+import qualified Userv.Http as H
 import qualified Data.List as L
 import qualified Data.Map as M
 import qualified Control.Concurrent as CC
@@ -12,6 +14,9 @@ import qualified Control.Concurrent.MVar as MV
 import qualified Control.Exception as E
 import qualified Control.Concurrent.STM as STM
 import qualified Control.Concurrent.STM.TVar as TV
+import qualified Data.HashMap.Strict as HM
+import qualified Data.Text.Encoding as TE
+import qualified Data.ByteString.Char8 as C
 
 {--------------------------------------------------------------------
   Types and helpers.  
@@ -19,52 +24,30 @@ import qualified Control.Concurrent.STM.TVar as TV
 
 data Endpoint = E {
     alias :: T.Text,        -- Ie. "register"
-    path :: T.Text,         -- Ie. "whatever/you/wish/reg"
-    method :: T.Text
-} deriving (Eq, Show)
+    path :: T.Text          -- Ie. "whatever/you/wish/reg"
+} deriving (Eq, Show, Generic)
 
--- Horrible boilerplate, extend hakit to deal with it.
-instance DocValLike Endpoint where
-    toDocVal e = d [
-            "alias"     .- alias e,
-            "path"      .- path e,
-            "method"    .- method e
-        ]
-    fromDocVal d =
-        let doc = toMap d
-        in E    (toString $ get "alias" doc)
-                (toString $ get "path" doc)
-                (toString $ get "method" doc)
+instance ToJSON Endpoint
+instance FromJSON Endpoint
 
 data Instance = I {
-    connectTime     :: Integer,                 -- Timestamp when the connection was established
     address         :: T.Text,                  -- "http://myservice.com" or "https://myservice.com:8081"
     serviceName     :: T.Text,                  -- Servicename, eg. "image-resize", "comment"
     instanceName    :: T.Text,                  -- A unique identifier of the service instance
     endpoints       :: M.Map T.Text Endpoint    -- Map from endpoint alias to Endpoint
-} deriving (Eq, Show)
+} deriving (Eq, Show, Generic)
 
-instance DocValLike Instance where
-    toDocVal i = d [
-            "connectTime"   .- connectTime i,
-            "address"       .- address i,
-            "serviceName"   .- serviceName i,
-            "instanceName"  .- instanceName i,
-            "endpoints"     .- endpoints i
-        ]
-    fromDocVal d =
-        let doc = toMap d
-        in I    (toInt      $ get "connectTime" doc)
-                (toString   $ get "address" doc)
-                (toString   $ get "serviceName" doc)
-                (toString   $ get "instanceName" doc)
-                (fromDocVal $ get "endpoints" doc)
+instance ToJSON Instance
+instance FromJSON Instance
 
 -- Maps serviceNames to instances
 data Instances = Is {
     byServiceName   :: M.Map T.Text [T.Text],
     services        :: M.Map T.Text Instance
-} deriving (Eq, Show)
+} deriving (Eq, Show, Generic)
+
+instance ToJSON Instances
+instance FromJSON Instances
 
 insert :: Instance -> Instances -> Instances
 insert i is =
@@ -92,71 +75,59 @@ remove iName is =
 serviceNames :: Instances -> [T.Text]
 serviceNames ins = map fst . M.toList $ byServiceName ins
 
-instance DocValLike Instances where
-    toDocVal i = d [
-            "byServiceName" .- byServiceName i,
-            "services"      .- services i
-        ]
-
 {--------------------------------------------------------------------
   Handlers.  
 --------------------------------------------------------------------}
 
-pingHandler = return $ H.setBody pong H.resp
-    where
-        pong = toJSON $ dm ["pong" .- True]
+pingHandler = object ["pong" .= True]
 
-unrecHandler = return $ H.setBody unrecognizedPath H.resp
-    where
-        unrecognizedPath = toJSON $ dm ["error" .- "Unrecognized path"]
+unrecHandler = return $ object ["error" .= "Unrecognized path"]
 
-connectedHandler :: TV.TVar Instances -> IO H.Resp
+connectedHandler :: TV.TVar Instances -> IO Value
 connectedHandler instances = do
     inst <- TV.readTVarIO instances
-    return $ H.setBody (toJSON . toMap $ toDocVal inst) H.resp
+    return $ toJSON inst
 
-ok = toJSON $ dm ["ok" .- True]
+ok = encode $ object ["ok" .= True]
 
-err :: Show e => e -> IO H.Resp
-err e =
-    let body = toJSON $ dm ["error" .- show e]
-    in return . H.setStatus 500 $ H.setBody body H.resp
-
-eize :: Show e => e -> T.Text
-eize e = toJSON $ dm ["error" .- show e]
-
-disconnectHandler :: Document -> TV.TVar Instances -> IO H.Resp
+disconnectHandler :: Value -> TV.TVar Instances -> IO Value
 disconnectHandler doc instances = do
     STM.atomically $ TV.modifyTVar' instances del
-    return $ H.setBody ok H.resp
+    return $ object []
     where
-        iName = getString "istanceName" doc
+        iName = case doc of
+            Object hashmap  -> case HM.lookup "istanceName" hashmap of
+                Just x      -> case x of
+                    String x    -> x
+                    otherwise   -> "instanceName is not a string"
+                Nothing     -> error "instanceName not found"
+            otherwise       -> error "Input not a map"
         del = remove iName
 
-routeHandler :: Document -> TV.TVar Instances -> T.Text -> T.Text -> IO H.Resp
-routeHandler doc instances sName endpoint = do
+proxyHandler :: Value -> TV.TVar Instances -> T.Text -> T.Text -> IO Value
+proxyHandler v instances sName endpoint = do
     inst <- TV.readTVarIO instances
     case M.lookup sName $ byServiceName inst of
-        Nothing     -> return serviceNotFound
+        Nothing     -> serviceNotFound
         Just names  -> case M.lookup (head names) $ services inst of
             Nothing -> error . T.unpack $ T.concat ["inconsistent state for ", head names]
             Just i  -> case M.lookup endpoint $ endpoints i of
-                Nothing -> return endpointNotFound
-                Just e  -> call i e
+                Nothing -> endpointNotFound
+                Just e  -> proxy i e
     where
-        call :: Instance -> Endpoint -> IO H.Resp
-        call i e = do
-            let p = filter (\x -> T.length x > 0) . T.splitOn "/" $ path e
-                r = H.setMethod (method e) . H.setPath p $ H.setDomain (address i) H.req
-            resp <- H.request r
-            return resp
+        proxy :: Instance -> Endpoint -> IO Value
+        proxy i e = do
+            resp <- H.req (B.concat $ map TE.encodeUtf8 [address i, "/", path e]) v
+            case resp of
+                Just rsp    -> return rsp
+                Nothing     -> return $ object ["error" .= "Something went wrong"] -- obv. fix this later
         -- 400ish errors
         serviceNotFound =
-            let msg = eize $ T.concat["service ", sName, " not found"]
-            in H.setStatus 400 $ H.setBody msg H.resp
+            let msg = T.concat["service ", sName, " not found"]
+            in return $ object ["error" .= msg]
         endpointNotFound =
-            let msg = eize $ T.concat ["endpoint ", endpoint, " for service ", sName, " not found"]
-            in H.setStatus 400 $ H.setBody msg H.resp
+            let msg = T.concat ["endpoint ", endpoint, " for service ", sName, " not found"]
+            in return $ object ["error" .= msg]
 
 {--------------------------------------------------------------------
   Connect handler.  
@@ -167,15 +138,18 @@ routeHandler doc instances sName endpoint = do
 --        "instanceName"  .- True
 --    ]
 
-connectHandler :: Document -> TV.TVar Instances -> IO H.Resp
+connectHandler :: Value -> TV.TVar Instances -> IO Value
 connectHandler dat instances = do
     -- Strangely the nonstrict version gives the same
     -- effect as when an IORef stores the error?!
     STM.atomically $ TV.modifyTVar' instances upd
-    return $ H.setBody ok H.resp
+    return $ object []
     where
         inst :: Instance
-        inst = fromDocVal . d . set "connectTime" 1 $ dat
+        -- @todo remove this cruft
+        inst = case decode $ encode dat of
+            Just i  -> i 
+            Nothing -> error "Could not decode JSON"
         upd :: Instances -> Instances
         upd = insert inst
 
@@ -183,19 +157,29 @@ connectHandler dat instances = do
   Main loop.  
 --------------------------------------------------------------------}
 
+err :: Show e => e -> IO Value
+err e = return $ object ["error" .= show e]
+
+correct xs = if length xs > 0
+    then if xs!!0 == ""
+        then tail xs
+        else xs
+    else xs
+
 main = do
     putStrLn "Starting ORC"
     instances <- TV.newTVarIO $ Is (M.fromList []) (M.fromList [])
-    let handler req =
-            let postJSON = fromJSON $ H.body req
-            in case H.path req of
-                ["disconnect"]  -> disconnectHandler postJSON instances
+    let handler :: B.ByteString -> Value -> IO Value 
+        handler path' v =
+            let path = C.split '/' path'
+            in case correct path of
+                ["disconnect"]  -> disconnectHandler v instances
                 ["connected"]   -> connectedHandler instances
-                ["connect"]     -> connectHandler postJSON instances
-                ["ping"]        -> pingHandler
-                [a, b]          -> routeHandler postJSON instances a b
+                ["connect"]     -> connectHandler v instances
+                ["ping"]        -> return pingHandler
+                [a, b]          -> proxyHandler v instances (TE.decodeUtf8 a) (TE.decodeUtf8 b)
                 otherwise       -> unrecHandler
-        exHandler :: E.SomeException -> IO H.Resp
+        exHandler :: E.SomeException -> IO Value
         exHandler e = err e
-        handlerEx = \req -> E.catch (handler req) exHandler
-    H.startServer 8081 handlerEx
+        handlerEx = \path v -> E.catch (handler path v) exHandler
+    H.serve 8081 handlerEx
