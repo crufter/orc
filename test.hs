@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings      #-}
+{-# LANGUAGE ExtendedDefaultRules   #-}
 
 module Test where
 
@@ -15,8 +16,8 @@ testConnect = TestCase $ do
 			"instanceName" .= "wrapper 1234",
 			"endpoints" .= [
 				"wrap" .= [
-					"alias": "wrap",
-					"path": "wrap"
+					"alias" .= "wrap",
+					"path" .= "wrap"
 				]
 			]
 		]
