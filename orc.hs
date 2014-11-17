@@ -177,18 +177,14 @@ connectHandler dat instances = do
   Main loop.  
 --------------------------------------------------------------------}
 
-err :: Show e => e -> IO Value
-err e = return $ object ["error" .= show e]
-
-correct xs = if length xs > 0
-    then if xs!!0 == ""
-        then tail xs
-        else xs
-    else xs
-
 handler :: TV.TVar Instances -> B.ByteString -> Value -> IO Value 
 handler instances path' v =
-    let path = C.split '/' path'
+    let correct xs = if length xs > 0
+            then if xs!!0 == ""
+                then tail xs
+                else xs
+            else xs
+        path = C.split '/' path'
     in case correct path of
         ["connect"]             -> connectHandler v instances
         ["connected"]           -> connectedHandler instances
@@ -201,9 +197,12 @@ handler instances path' v =
         -- ["disconnectExample"]   ->
         -- ["endpointList"]        -> 
 
+
 orc :: TV.TVar Instances -> Int -> IO ()
 orc instances portNum = do 
-    let exHandler :: E.SomeException -> IO Value
+    let err :: Show e => e -> IO Value
+        err e = return $ object ["error" .= show e]
+        exHandler :: E.SomeException -> IO Value
         exHandler e = err e
         handlerEx = \path v -> E.catch (handler instances path v) exHandler
     H.serve portNum handlerEx
