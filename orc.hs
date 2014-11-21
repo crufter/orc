@@ -3,10 +3,10 @@
 {-# LANGUAGE DeriveGeneric          #-}
 
 module Orc(
-    orc,
+    startOrc,
     Instances,
-    newInstances,
-    handler
+    newOrc,
+    router
 ) where
 
 import Data.Aeson
@@ -119,8 +119,8 @@ connectedHandler instances = do
 
 ok = encode $ object ["ok" .= True]
 
-disconnectHandler :: Value -> TV.TVar Instances -> IO Value
-disconnectHandler doc instances = do
+disconnectHandler :: TV.TVar Instances -> Value -> IO Value
+disconnectHandler instances doc = do
     STM.atomically $ TV.modifyTVar' instances del
     return $ object []
     where
@@ -133,8 +133,8 @@ disconnectHandler doc instances = do
             otherwise       -> error "Input not a map"
         del = remove iName
 
-proxyHandler :: Value -> TV.TVar Instances -> T.Text -> T.Text -> IO Value
-proxyHandler v instances sName endpoint = do
+proxyHandler :: TV.TVar Instances -> Caller -> Value -> T.Text -> T.Text -> IO Value
+proxyHandler instances caller v sName endpoint = do
     inst <- TV.readTVarIO instances
     case M.lookup sName $ byServiceName inst of
         Nothing     -> serviceNotFound
@@ -158,8 +158,8 @@ proxyHandler v instances sName endpoint = do
             let msg = T.concat ["endpoint ", endpoint, " for service ", sName, " not found"]
             in return $ object ["error" .= msg]
 
-connectHandler :: Value -> TV.TVar Instances -> IO Value
-connectHandler dat instances = do
+connectHandler :: TV.TVar Instances -> Value -> IO Value
+connectHandler instances dat = do
     -- Strangely the nonstrict version gives the same
     -- effect as when an IORef stores the error?!
     STM.atomically $ TV.modifyTVar' instances upd
@@ -177,8 +177,8 @@ connectHandler dat instances = do
   Main loop.  
 --------------------------------------------------------------------}
 
-handler :: TV.TVar Instances -> B.ByteString -> Value -> IO Value 
-handler instances path' v =
+router :: Orc -> B.ByteString -> Value -> IO Value 
+router (Orc instances caller) path' v =
     let correct xs = if length xs > 0
             then if xs!!0 == ""
                 then tail xs
@@ -186,23 +186,30 @@ handler instances path' v =
             else xs
         path = C.split '/' path'
     in case correct path of
-        ["connect"]             -> connectHandler v instances
+        ["connect"]             -> connectHandler instances v
         ["connected"]           -> connectedHandler instances
-        ["disconnect"]          -> disconnectHandler v instances
+        ["disconnect"]          -> disconnectHandler instances v
         ["ping"]                -> return pingHandler
-        [a, b]                  -> proxyHandler v instances (TE.decodeUtf8 a) (TE.decodeUtf8 b)
+        [a, b]                  -> proxyHandler instances caller v (TE.decodeUtf8 a) (TE.decodeUtf8 b)
         otherwise               -> unrecHandler
         --
         -- ["connectExample"]      ->
         -- ["disconnectExample"]   ->
         -- ["endpointList"]        -> 
 
+type Caller = B.ByteString -> Value -> IO (Maybe Value)
+data Orc = Orc (TV.TVar Instances) Caller
 
-orc :: TV.TVar Instances -> Int -> IO ()
-orc instances portNum = do 
+newOrc :: IO Orc
+newOrc = do
+    instances <- TV.newTVarIO newInstances
+    return $ Orc instances H.req
+
+startOrc :: Orc -> Int -> IO ()
+startOrc instances portNum = do 
     let err :: Show e => e -> IO Value
         err e = return $ object ["error" .= show e]
-        exHandler :: E.SomeException -> IO Value
-        exHandler e = err e
-        handlerEx = \path v -> E.catch (handler instances path v) exHandler
-    H.serve portNum handlerEx
+        exRouter :: E.SomeException -> IO Value
+        exRouter e = err e
+        routerEx = \path v -> E.catch (router instances path v) exRouter
+    H.serve portNum routerEx

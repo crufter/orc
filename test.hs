@@ -6,12 +6,11 @@ module Test where
 import Test.HUnit
 import Orc
 import Data.Aeson
-import qualified Control.Concurrent.STM.TVar as TV
 
 eq a b = assertBool ((show a) ++ " vs " ++ (show b)) $ a == b
 
 testConnect = TestCase $ do
-	instances <- TV.newTVarIO newInstances
+	orc <- newOrc
 	let inst = object [
 			"address" .= "127.0.0.1:6060",
 			"serviceName" .= "wrapper",
@@ -24,8 +23,8 @@ testConnect = TestCase $ do
 			],
 			"weight" .= 1
 		]
-	handler instances "/connect" inst
-	x <- handler instances  "/connected" $ object []
+	router orc "/connect" inst
+	x <- router orc  "/connected" $ object []
 	let exp = object [
 			"byServiceName" .= object [
 				"wrapper" .= ["wrapper 1234"]
